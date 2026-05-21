@@ -1,0 +1,710 @@
+/**
+ * FUNCIÓN ONOPEN
+ * Se ejecuta automáticamente al abrir el Google Sheet.
+ * Crea el menú personalizado en la parte superior.
+ */
+function onOpen() {
+  const ui = SpreadsheetApp.getUi();
+  
+  ui.createMenu('Procesamiento')
+    .addItem('1. Generar Informe Churn', 'main') // Procesa los datos
+    .addSeparator() 
+    .addItem('2. Vista Previa y Envío', 'abrirVistaPrevia') // Abre la ventana para enviar
+    .addToUi();
+}
+
+/**
+ * FUNCIÓN PRINCIPAL (El Director de Orquesta)
+ * Coordina las fases: Extraer -> Transformar -> Cargar -> Mostrar Éxito
+ */
+function main() {
+  Logger.log("--- INICIANDO PROCESO ETL ---");
+
+  try {
+    // 1. EXTRAER (E) - Ahora conecta directamente con el Data Lake de Drive
+    const datosCrudos = extraerDatosCloud();
+    if (!datosCrudos) return; // Si no hay datos, la función extraer ya lanzó el error
+
+    // 2. TRANSFORMAR (T)
+    const datosProcesados = transformarDatos(datosCrudos);
+
+    // 3. CARGAR (L)
+    if (datosProcesados && datosProcesados.length > 1) {
+      
+      cargarDatos(datosProcesados); 
+
+      // 4. CONTROL DE CALIDAD Y MODAL
+      Logger.log("Ejemplo de cliente filtrado: " + JSON.stringify(datosProcesados[1]));
+      
+      // Llamamos a la función que lanza la ventana HTML
+      mostrarModalExito(datosProcesados.length);
+      
+      Logger.log("--- PROCESO COMPLETADO CON ÉXITO ---");
+      
+    } else {
+      SpreadsheetApp.getUi().alert("No se encontraron clientes que cumplan el filtro (Churn = 1).");
+    }
+
+  } catch (error) {
+    Logger.log("ERROR CRÍTICO EN MAIN: " + error.message);
+    SpreadsheetApp.getUi().alert("Hubo un error en el proceso: " + error.message);
+  }
+}
+
+/**
+ * FASE E: EXTRACCIÓN (HISTÓRICA / COMENTADA PARA EVITAR PÉRDIDAS)
+ */
+/*
+function extraerDatos() {
+  const libro = SpreadsheetApp.getActiveSpreadsheet();
+  const hoja = libro.getSheetByName("Datos_Crudos");
+  
+  if (!hoja) {
+    SpreadsheetApp.getUi().alert("Error: No se encuentra la pestaña 'Datos_Crudos'.");
+    return null;
+  }
+  
+  const matriz = hoja.getDataRange().getValues();
+  return matriz;
+}
+*/
+
+/**
+ * FASE E NUEVA: EXTRACCIÓN DESDE LA NUBE
+ */
+function extraerDatosCloud() {
+  // 1. Buscamos el archivo en nuestro "Data Lake" (Google Drive)
+  var nombreArchivo = "datos_gimnasio_cloud.csv";
+  var iteradorArchivos = DriveApp.getFilesByName(nombreArchivo);
+  
+  // Verificamos si el archivo existe
+  if (iteradorArchivos.hasNext()) {
+    var archivo = iteradorArchivos.next();
+    
+    // 2. Extraemos el contenido en formato texto puro
+    var contenidoTexto = archivo.getBlob().getDataAsString();
+    
+    // 3. ¡LA MAGIA! Convertimos el texto CSV en una matriz bidimensional
+    var matrizDatos = Utilities.parseCsv(contenidoTexto);
+    
+    Logger.log("✅ Datos extraídos de la nube correctamente. Filas: " + matrizDatos.length);
+    
+    // Devolvemos la matriz. A partir de aquí, vuestro código de Calcular.gs 
+    // funcionará EXACTAMENTE igual que antes, ¡porque la estructura es la misma!
+    return matrizDatos;
+    
+  } else {
+    Logger.log("❌ ERROR: No se encontró el archivo en Drive. Revisa que estés usando el mismo correo.");
+    return null;
+  }
+}
+
+
+/**
+ * FUNCIÓN PARA MOSTRAR EL MODAL (La interfaz)
+ * Conecta con VistaResumen.html
+ */
+function mostrarModalExito(totalFilas) {
+  // Cargamos el archivo HTML
+  const template = HtmlService.createTemplateFromFile('VistaResumen');
+  
+  // Pasamos el dato dinámico al HTML (restando la cabecera)
+  template.cantidad = totalFilas - 1; 
+  
+  // Evaluamos la plantilla y configuramos la ventana
+  const html = template.evaluate()
+      .setWidth(400)
+      .setHeight(300)
+      .setTitle('Informe Finalizado');
+      
+  // Lanzamos el diálogo en la interfaz de Google Sheets
+  SpreadsheetApp.getUi().showModalDialog(html, ' ');
+}
+
+/**
+ * SERVICIO WEB APP (Despliegue como enlace)
+ */
+function doGet() {
+  const metricas = calcularMetricasDashboard();
+  const template = HtmlService.createTemplateFromFile('Dashboard');
+  
+  // Al ser false, el HTML mostrará el bloque "Dashboard Interactivo de Negocio"
+  template.esResumenEmail = false; 
+  
+  // Importante: En la web no queremos que aparezca el botón de "Enviar Email"
+  template.esVistaPrevia = false; 
+
+  // Pasamos los datos del backend a la web (el puente)
+  template.totalClientes = metricas.total;
+  template.totalBajas = metricas.bajas;
+  template.porcentajeChurn = metricas.porcentaje;
+  template.colorAlerta = metricas.color;
+  
+  // Añadimos los nuevos datos para que no aparezcan vacíos en las tarjetas
+  template.mediaEdadBajas = metricas.mediaEdadBajas;
+  template.contratoMensual = metricas.contratoMensual;
+  template.contratoAnual = metricas.contratoAnual;
+  
+  return template.evaluate()
+      .setTitle('Dashboard de Bajas - Gym')
+      .addMetaTag('viewport', 'width=device-width, initial-scale=1');
+}
+
+// 1. FUNCIÓN PARA ABRIR LA VENTANA DE REVISIÓN
+function abrirVistaPrevia() {
+  const metricas = calcularMetricasDashboard();
+  const template = HtmlService.createTemplateFromFile('Dashboard');
+  
+  // Pasamos los datos
+  template.esResumenEmail = false;
+  template.totalClientes = metricas.total;
+  template.totalBajas = metricas.bajas;
+  template.porcentajeChurn = metricas.porcentaje;
+  template.colorAlerta = metricas.color;
+  template.mediaEdadBajas = metricas.mediaEdadBajas;
+  template.contratoMensual = metricas.contratoMensual;
+  template.contratoAnual = metricas.contratoAnual;
+  
+  // ACTIVAMOS EL BOTÓN (Solo en Sheets)
+  template.esVistaPrevia = true; 
+  
+  const html = template.evaluate().setWidth(850).setHeight(600);
+  SpreadsheetApp.getUi().showModalDialog(html, 'Revisión de Informe antes de Envío');
+}
+
+// 2. FUNCIÓN PARA ENVIAR EL EMAIL REAL
+function enviarCorreoDashboard() {
+  const metricas = calcularMetricasDashboard();
+  const template = HtmlService.createTemplateFromFile('Dashboard');
+  
+  //--- PARÁMETROS PARA EL "HTML TRANSFORMISTA" ---
+  template.esResumenEmail = true; // Activamos el bloque corto para el correo
+  template.urlAppWeb = "https://script.google.com/macros/s/AKfycbyHIqBkFQ_WZqdBpTikN8gLlXpI7NLUQ9kcF8526ZzVndMe33AIRgqzG5XysSNzLJnM/exec"; 
+
+  // Inyectamos los datos en la plantilla (Inyectamos TODOS para que el HTML los use)
+  template.totalBajas = metricas.bajas;
+  template.porcentajeChurn = metricas.porcentaje;
+  template.colorAlerta = metricas.color;
+  template.mediaEdadBajas = metricas.mediaEdadBajas;
+  template.contratoMensual = metricas.contratoMensual;
+  template.totalClientes = metricas.total;
+
+  // Lógica para el asunto dinámico
+  const icono = parseFloat(metricas.porcentaje) > 20 ? "⚠️" : "✅";
+  const asuntoDinamico = icono + " Reporte Ejecutivo de Retención - Mayo 2026";
+  
+  template.esVistaPrevia = false; 
+  
+  const cuerpoHtml = template.evaluate().getContent();
+  
+  // ENVIAR CORREO 
+  GmailApp.sendEmail(
+    "betcanillas@gmail.com, juanalberto.martos@opplus.bbva.com", 
+    asuntoDinamico, 
+    "Tu cliente de correo no soporta HTML.", 
+    { htmlBody: cuerpoHtml }
+  );
+
+  SpreadsheetApp.getUi().alert('✅ Informe enviado correctamente a los stakeholders.');
+}
+
+function carreraVelocidadJS() {
+  var datos = extraerDatosCloud(); // Trae las 50.000 filas
+  var inicio = new Date().getTime();
+  
+  var sumaEdad = 0;
+  var totalFilas = datos.length;
+  
+  // Recorremos las 50.000 filas con un bucle
+  for (var i = 1; i < totalFilas; i++) {
+    sumaEdad += Number(datos[i][0]); // La edad está en la primera columna
+  }
+  
+  var promedio = sumaEdad / (totalFilas - 1);
+  var fin = new Date().getTime();
+  
+  Logger.log("🏁 JS - Promedio de edad: " + promedio.toFixed(2));
+  Logger.log("⏱️ JS - Tiempo invertido: " + (fin - inicio) + " milisegundos.");
+}
+
+
+
+/**
+ * Fase 2: Transformación
+ * Este archivo contiene la lógica matemática y de filtrado.
+ */
+function transformarDatos(matriz) {
+  // 1. Separar la cabecera del cuerpo de datos
+  const cabecera = matriz[0];
+  const datos = matriz.slice(1);
+
+  // 2. Identificar índices de columnas
+  const idxChurn = cabecera.indexOf("Churn");
+  const idxAge = cabecera.indexOf("Age");
+  const idxContract = cabecera.indexOf("Contract_period");
+  const idxFrequency = cabecera.indexOf("Avg_class_frequency_total");
+
+  Logger.log("--- FASE DE TRANSFORMACIÓN INICIADA ---");
+
+  // 3. FILTRAR: Solo usuarios que se dieron de baja (Churn == 1)
+  const filtrados = datos.filter(fila => fila[idxChurn] == 1);
+
+  // 4. MAPEAR: Seleccionar solo las columnas deseadas
+  const mapeados = filtrados.map(fila => {
+    return [
+      fila[idxAge],      
+      fila[idxContract],  
+      // .toFixed(2) lo convierte a texto con 2 decimales
+      Number(fila[idxFrequency]).toFixed(2) 
+    ];
+  });
+
+  // 5. Añadir nuevas cabeceras para el reporte final
+  // --- GUARDAMOS LA ESTRUCTURA ORIGINAL EN COMENTARIOS ---
+  // const resultadoFinal = [
+  //   ["Edad", "Meses_Contrato", "Frecuencia_Clases"],
+  //   ...mapeados
+  // ];
+  
+  // --- NUEVA ESTRUCTURA CLOUD: Guardamos el Total de Clientes de la nube en la cabecera para recuperarlo en el dashboard ---
+  const resultadoFinal = [
+    ["Edad", "Meses_Contrato", "Frecuencia_Clases", "Total_Clientes_Cloud"],
+    ...mapeados.map((fila, index) => index === 0 ? [...fila, matriz.length - 1] : [...fila, ""])
+  ];
+
+  Logger.log("Filas después de filtrar (Churn=1): " + filtrados.length);
+  Logger.log("--- FASE DE TRANSFORMACIÓN COMPLETADA ---");
+
+  return resultadoFinal;
+} 
+
+function cargarDatos(datos) {
+  // 1. Usamos nuestra función auxiliar para preparar la hoja
+  const hojaDestino = obtenerOCrearHoja("Resultados_Churn");
+
+  // 2. Limpiamos la hoja antes de volcar para evitar que queden datos residuales viejos
+  hojaDestino.clearContents();
+
+  // 3. Calculamos las dimensiones de nuestra matriz de datos
+  const filas = datos.length;
+  const columnas = datos[0].length;
+
+  // 4. Volcamos los datos de golpe
+  hojaDestino.getRange(1, 1, filas, columnas).setValues(datos);
+
+  // Le damos un poco de estilo a la cabecera
+  hojaDestino.getRange(1, 1, 1, columnas).setFontWeight("bold").setBackground("#d9ead3");
+  
+  Logger.log("--- FASE DE CARGA (L) COMPLETADA CON ÉXITO ---");
+}
+
+function calcularMetricasDashboard() {
+  const ss = SpreadsheetApp.getActiveSpreadsheet();
+  
+  // 1. HOJA DE RESULTADOS (De aquí leeremos TODO ahora)
+  const hojaResultados = ss.getSheetByName("Resultados_Churn");
+  if (!hojaResultados) {
+    console.error("Error: No se encontró la hoja 'Resultados_Churn'");
+    return { total: 0, bajas: 0, porcentaje: "0%", color: "grey", mediaEdadBajas: 0, contratoMensual: 0, contratoAnual: 0 };
+  }
+  
+  const datosResultados = hojaResultados.getDataRange().getValues();
+  if (datosResultados.length <= 1) {
+    return { total: 0, bajas: 0, porcentaje: "0%", color: "grey", mediaEdadBajas: 0, contratoMensual: 0, contratoAnual: 0 };
+  }
+
+  const cabeceraResultados = datosResultados[0];
+  const totalBajas = datosResultados.length - 1;
+
+  // --- CÓDIGO ANTIGUO COMENTADO (Buscaba en la pestaña estática antigua) ---
+  /*
+  const hojaOriginal = ss.getSheetByName("Datos_Crudos");
+  if (!hojaOriginal) {
+    console.error("Error: No se encontró la hoja 'Datos_Crudos'");
+    return { total: 0, bajas: 0, porcentaje: "0%", color: "grey", mediaEdadBajas: 0, contratoMensual: 0, contratoAnual: 0 };
+  }
+  const datosCrudos = hojaOriginal.getDataRange().getValues();
+  const cabecera = datosCrudos[0];
+  const totalClientes = datosCrudos.length - 1;
+  const idxEdad = cabecera.indexOf("Age");
+  const idxContrato = cabecera.indexOf("Contract_period");
+  const idxChurn = cabecera.indexOf("Churn");
+  */
+
+  // --- NUEVA LÓGICA CLOUD DIRECTA DESDE LA HOJA DE RESULTADOS ---
+  const idxEdad = cabeceraResultados.indexOf("Edad");
+  const idxContrato = cabeceraResultados.indexOf("Meses_Contrato");
+  const idxTotalCloud = cabeceraResultados.indexOf("Total_Clientes_Cloud");
+
+  // Recuperamos el total de clientes de la muestra de la nube que guardamos en la primera fila de datos
+  const totalClientes = Number(datosResultados[1][idxTotalCloud]) || 150; 
+
+  let sumaEdades = 0;
+  let mensual = 0;
+  let anual = 0;
+
+  const filasDatos = datosResultados.slice(1);
+  
+  filasDatos.forEach(fila => {
+    // Como esta hoja YA está filtrada con Churn = 1, procesamos todas las filas directamente
+    sumaEdades += Number(fila[idxEdad]) || 0;
+    const mesesContrato = Number(fila[idxContrato]);
+    
+    if (mesesContrato >= 12) {
+      anual++;
+    } else {
+      mensual++;
+    }
+  });
+
+  const mediaEdad = totalBajas > 0 ? (sumaEdades / totalBajas).toFixed(0) : 0;
+  const porcentajeNum = totalClientes > 0 ? (totalBajas / totalClientes) * 100 : 0;
+  const colorAlerta = porcentajeNum > 20 ? "#e74c3c" : "#2ecc71";
+
+  return {
+    total: totalClientes,
+    bajas: totalBajas,
+    porcentaje: porcentajeNum.toFixed(2) + "%",
+    color: colorAlerta,
+    mediaEdadBajas: mediaEdad,
+    contratoMensual: mensual,
+    contratoAnual: anual
+  };
+}
+
+
+
+function obtenerOCrearHoja(nombreHoja) {
+  const libro = SpreadsheetApp.getActiveSpreadsheet();
+  let hoja = libro.getSheetByName(nombreHoja);
+  
+  // Si la hoja no existe, la creamos
+  if (!hoja) {
+    hoja = libro.insertSheet(nombreHoja);
+    Logger.log("Hoja '" + nombreHoja + "' creada desde cero.");
+  } else {
+    // Si ya existe, la limpiamos por completo para evitar duplicados
+    hoja.clear();
+    Logger.log("Hoja '" + nombreHoja + "' encontrada y limpiada.");
+  }
+  
+  return hoja;
+}
+
+
+
+
+<!DOCTYPE html>
+<html>
+  <head>
+    <base target="_top">
+    <style>
+      body { 
+        font-family: 'Segoe UI', Arial, sans-serif; 
+        text-align: center; 
+        color: #333; 
+        padding: 20px;
+        background-color: #f9f9f9;
+      }
+      .card {
+        background: white;
+        border-radius: 12px;
+        padding: 25px;
+        box-shadow: 0 4px 15px rgba(0,0,0,0.1);
+        border-top: 6px solid #4CAF50;
+      }
+      h2 { color: #2e7d32; margin-top: 0; }
+      .numero { 
+        font-size: 42px; 
+        font-weight: bold; 
+        color: #1b5e20; 
+        margin: 15px 0;
+      }
+      .mensaje { font-size: 16px; margin-bottom: 20px; }
+      button { 
+        background-color: #4CAF50; 
+        color: white; 
+        padding: 12px 25px; 
+        border: none; 
+        border-radius: 6px; 
+        cursor: pointer; 
+        font-size: 14px;
+        transition: 0.3s;
+      }
+      button:hover { background-color: #388E3C; }
+    </style>
+  </head>
+  <body>
+    <div class="card">
+      <h2>¡Éxito!</h2>
+      <p class="mensaje">Se han analizado y filtrado:</p>
+      <div class="numero"><?= cantidad ?></div>
+      <p class="mensaje">registros de clientes con Churn.</p>
+      <button onclick="google.script.host.close()">Cerrar Ventana</button>
+    </div>
+  </body>
+</html>
+
+
+
+
+<!DOCTYPE html>
+<html>
+  <head>
+    <base target="_top">
+    <link href="https://fonts.googleapis.com/css2?family=Montserrat:wght@400;700&display=swap" rel="stylesheet">
+    
+    <style>
+      /* ESTILOS GENERALES DEL DASHBOARD (MODO OSCURO) */
+      body { 
+        font-family: 'Montserrat', sans-serif; 
+        background-color: #0f172a; 
+        color: #f8fafc;
+        margin: 0; 
+        padding: 40px; 
+      }
+
+      .container { 
+        max-width: 950px; 
+        margin: auto; 
+        background: #1e293b; 
+        padding: 40px;
+        border-radius: 24px;
+        box-shadow: 0 25px 50px -12px rgba(0,0,0,0.5);
+      }
+
+      h1 { 
+        font-size: 28px; 
+        font-weight: 700; 
+        margin-bottom: 30px; 
+        color: #ffffff;
+        text-transform: uppercase;
+        letter-spacing: 2px;
+        text-align: center;
+      }
+
+      /* GRID DE TARJETAS */
+      .grid-analisis { 
+        display: flex; 
+        gap: 20px; 
+        justify-content: center; 
+        flex-wrap: wrap; 
+        margin-bottom: 20px;
+      }
+
+      .card { 
+        background: rgba(255, 255, 255, 0.05); 
+        padding: 25px; 
+        border-radius: 16px; 
+        border: 1px solid rgba(255, 255, 255, 0.1);
+        flex: 1; 
+        min-width: 200px;
+        text-align: center;
+        transition: all 0.3s ease;
+      }
+
+      .card:hover {
+        background: rgba(255, 255, 255, 0.1);
+        transform: translateY(-8px);
+        border-color: <?= colorAlerta ?>;
+      }
+
+      .label { 
+        color: #94a3b8; 
+        font-size: 10px; 
+        font-weight: 700; 
+        text-transform: uppercase; 
+        letter-spacing: 1.5px;
+        margin-bottom: 10px;
+        display: block;
+      }
+
+      .valor { 
+        font-size: 34px; 
+        font-weight: 700; 
+        color: #ffffff;
+      }
+
+      /* SECCIÓN DE CHURN Y GRÁFICO */
+      .churn-box { 
+        margin-top: 30px; 
+        padding: 40px; 
+        background: rgba(15, 23, 42, 0.4);
+        border-radius: 20px; 
+        border: 1px solid rgba(255, 255, 255, 0.1);
+        border-top: 6px solid <?= colorAlerta ?>;
+        display: flex;
+        align-items: center;
+        justify-content: space-around;
+        flex-wrap: wrap;
+        gap: 20px;
+      }
+
+      /* BOTÓN DE ENVÍO */
+      #btnEnviar {
+        background: <?= colorAlerta ?>; 
+        color: white; 
+        padding: 18px 40px; 
+        border: none; 
+        border-radius: 50px; 
+        cursor: pointer; 
+        font-weight: 700; 
+        font-size: 16px; 
+        text-transform: uppercase;
+        box-shadow: 0 10px 20px rgba(0,0,0,0.3);
+        margin-top: 30px;
+        transition: 0.3s;
+      }
+
+      #btnEnviar:hover { filter: brightness(1.2); transform: scale(1.05); }
+
+      /* ESTILO ESPECÍFICO PARA EL CUERPO DEL EMAIL (FONDO CLARO) */
+      .email-card {
+        background: white;
+        color: #1e293b;
+        text-align: left;
+        border-radius: 15px;
+        overflow: hidden;
+        max-width: 600px;
+        margin: auto;
+      }
+    </style>
+  </head>
+  <body>
+    <div class="container">
+
+      <? if (esResumenEmail) { ?>
+        <div class="email-card">
+          <div style="background-color: <?= colorAlerta ?>; padding: 25px; text-align: center; color: white;">
+            <h2 style="margin: 0; text-transform: uppercase; letter-spacing: 2px; color: white;">Informe Estratégico de Retención</h2>
+            <p style="margin: 5px 0 0 0; opacity: 0.9;">InnovaData Cloud Data Lake | Muestra: <?= totalClientes ?> Clientes</p>
+          </div>
+
+          <div style="padding: 30px; color: #2c3e50; line-height: 1.6;">
+            <p>Estimado Director,</p>
+            <p>Tras concluir el análisis avanzado de los indicadores de retención extraídos directamente de nuestro almacén en la nube, se han obtenido las siguientes conclusiones estratégicas:</p>
+            
+            <ul style="padding-left: 20px;">
+              <li><strong>Volumen:</strong> Se identifican <strong><?= totalBajas ?> bajas</strong> sobre un total de <?= totalClientes ?> registros cloud.</li>
+              <li><strong>Perfil:</strong> La pérdida de clientes se concentra en el segmento de <strong><?= mediaEdadBajas ?> años</strong>.</li>
+              <li><strong>Riesgo:</strong> Vulnerabilidad alta en contratos mensuales (<strong><?= contratoMensual ?> casos</strong>).</li>
+            </ul>
+
+            <div style="background: #f8fafc; border-left: 4px solid <?= colorAlerta ?>; padding: 15px; margin: 20px 0;">
+              <strong>Conclusión:</strong> 
+              <?= (parseFloat(porcentajeChurn) > 20) ? 
+                  "La tasa de churn actual es crítica en el repositorio remoto. Se requiere intervención inmediata sobre el programa de fidelización." : 
+                  "La situación en la nube se mantiene estable y bajo los parámetros de control establecidos." ?>
+            </div>
+
+            <p>Quedo a su disposición para cualquier aclaración.</p>
+            
+            <div style="margin-top: 30px; border-top: 1px solid #f1f5f9; padding-top: 20px;">
+              <strong>Betsabé Cardoso</strong><br>
+              <span style="color: #64748b; font-size: 13px;">Analista de Datos Especialista en BI</span>
+            </div>
+
+            <div style="text-align: center; margin-top: 30px;">
+              <a href="<?= urlAppWeb ?>" style="background: #0f172a; color: white; padding: 14px 28px; text-decoration: none; border-radius: 8px; font-weight: 600; display: inline-block;">
+                Acceder al Dashboard Interactivo
+              </a>
+            </div>
+          </div>
+        </div>
+
+      <? } else { ?>
+        <h1>Panel de Inteligencia de Negocio (Cloud Lake)</h1>
+        
+        <div class="grid-analisis">
+          <div class="card">
+            <span class="label">Clientes Totales (Cloud)</span>
+            <span class="valor"><?= totalClientes ?></span>
+          </div>
+          <div class="card" style="border-color: <?= colorAlerta ?>;">
+            <span class="label">Bajas Detectadas</span>
+            <span class="valor" style="color: <?= colorAlerta ?>;"><?= totalBajas ?></span>
+          </div>
+          <div class="card">
+            <span class="label">Edad Media Bajas</span>
+            <span class="valor"><?= mediaEdadBajas ?></span>
+          </div>
+        </div>
+
+        <div class="grid-analisis">
+          <div class="card">
+            <span class="label">Contratos Mensuales</span>
+            <span class="valor" style="color: #38bdf8;"><?= contratoMensual ?></span>
+          </div>
+          <div class="card">
+            <span class="label">Contratos Anuales</span>
+            <span class="valor" style="color: #a855f7;"><?= contratoAnual ?></span>
+          </div>
+        </div>
+
+        <div class="churn-box">
+          <div style="text-align: center;">
+            <span class="label">Tasa de Abandono</span>
+            <div class="valor" style="color: <?= colorAlerta ?>; font-size: 70px; margin: 10px 0;">
+              <?= porcentajeChurn ?>
+            </div>
+            <p style="font-size: 16px; font-weight: 700; color: <?= colorAlerta ?>;">
+              ESTADO: <?= (parseFloat(porcentajeChurn) > 20) ? "CRÍTICO" : "ESTABLE" ?>
+            </p>
+          </div>
+
+          <div id="grafico_donut" style="width: 350px; height: 250px;"></div>
+        </div>
+
+        <? if (esVistaPrevia) { ?>
+          <div style="text-align: center;">
+            <button onclick="enviarConCarga()" id="btnEnviar">Confirmar y Enviar al Director</button>
+            <p id="msgCarga" style="display:none; color: #94a3b8; margin-top: 20px;">🚀 Conectando con servidor de correo y preparando reporte...</p>
+          </div>
+        <? } ?>
+      <? } ?>
+
+    </div>
+
+    <script type="text/javascript" src="https://www.gstatic.com/charts/loader.js"></script>
+    <script type="text/javascript">
+      google.charts.load('current', {'packages':['corechart']});
+      google.charts.setOnLoadCallback(dibujarGrafico);
+
+      function dibujarGrafico() {
+        var bajas = Number("<?= totalBajas ?>");
+        var total = Number("<?= totalClientes ?>");
+        var activos = total - bajas;
+
+        var data = google.visualization.arrayToDataTable([
+          ['Estado', 'Clientes'],
+          ['Activos', activos],
+          ['Bajas', bajas]
+        ]);
+
+        var options = {
+          pieHole: 0.5,
+          backgroundColor: 'transparent',
+          legend: { position: 'bottom', textStyle: { color: '#ffffff', fontSize: 11 } },
+          colors: ['#10b981', '<?= colorAlerta ?>'],
+          chartArea: { width: '100%', height: '80%' },
+          pieSliceBorderColor: 'transparent',
+          pieSliceText: 'none'
+        };
+
+        var chart = new google.visualization.PieChart(document.getElementById('grafico_donut'));
+        chart.draw(data, options);
+      }
+
+      function enviarConCarga() {
+        document.getElementById('btnEnviar').style.display = 'none';
+        document.getElementById('msgCarga').style.display = 'block';
+        google.script.run
+          .withSuccessHandler(() => {
+            alert("✅ ¡Informe enviado con éxito!");
+            google.script.host.close();
+          })
+          .enviarCorreoDashboard();
+      }
+    </script>
+  </body>
+</html>
